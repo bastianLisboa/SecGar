@@ -1,0 +1,2 @@
+Run the optimized GeoHints V10 atlas build with 50 visible strict shards.
+Triggered after replacing the opaque 25-batch process.
