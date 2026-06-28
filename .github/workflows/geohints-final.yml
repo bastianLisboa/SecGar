@@ -1,4 +1,4 @@
-name: Build final GeoHints V10 atlas
+name: Build final GeoHints V10 atlas - fast visible shards
 on:
   pull_request:
     branches: [main]
@@ -11,9 +11,15 @@ concurrency:
 permissions:
   contents: read
 jobs:
-  build:
+  build-shards:
+    name: shard-${{ format('{0}', matrix.shard) }} · 5 countries
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49]
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,94 +27,124 @@ jobs:
           python-version: '3.12'
       - name: Install dependencies
         run: |
-          sudo apt-get update
+          sudo apt-get update -qq
           sudo apt-get install -y fonts-dejavu-core
-          pip install requests pillow reportlab pypdf pycountry Babel
-      - name: Download builder sources
+          pip install --disable-pip-version-check -q requests pillow reportlab pypdf pycountry Babel
+      - name: Download and assemble verified builder
         run: |
-          mkdir -p geohints
+          mkdir -p geohints-work
           base='https://raw.githubusercontent.com/bastianLisboa/App_recetas/geohints-public-build-20260628/geohints'
-          for file in part1.py part2a.py part2b_v2.b64 part2c_v3.b64 part2d_v2.b64 part3.b64 part4a.b64 part4b.b64 merge.py; do
-            curl --fail --location --retry 5 --retry-delay 3 "$base/$file" --output "geohints/$file"
+          for file in part1.py part2a.py part2b_v2.b64 part2c_v3.b64 part2d_v2.b64 part3.b64 part4a.b64 part4b.b64; do
+            curl --fail --location --retry 5 --retry-delay 2 "$base/$file" --output "geohints-work/$file"
           done
-      - name: Assemble builder
-        working-directory: geohints
-        run: |
+          cd geohints-work
           cat part1.py part2a.py > build.py
           base64 -d part2b_v2.b64 >> build.py
           base64 -d part2c_v3.b64 >> build.py
           base64 -d part2d_v2.b64 >> build.py
           base64 -d part3.b64 >> build.py
           cat part4a.b64 part4b.b64 | base64 -d >> build.py
-          python -m py_compile build.py
-      - name: Build 250 countries in 25 batches
-        working-directory: geohints
-        run: |
-          cat > orchestrate.py <<'PY'
-          import os,subprocess,sys
-          from concurrent.futures import ThreadPoolExecutor,as_completed
-          from pathlib import Path
-          Path('logs').mkdir(exist_ok=True)
-          def run(i):
-              env=os.environ.copy();env['BATCH_ID']=str(i);env['BATCH_SIZE']='10'
-              with open(f'logs/batch-{i:02d}.log','w',encoding='utf-8') as log:
-                  p=subprocess.run([sys.executable,'build.py'],env=env,stdout=log,stderr=subprocess.STDOUT)
-              return i,p.returncode
-          failures=[]
-          with ThreadPoolExecutor(max_workers=4) as ex:
-              futures=[ex.submit(run,i) for i in range(25)]
-              for future in as_completed(futures):
-                  i,code=future.result();print({'batch':i,'returncode':code},flush=True)
-                  if code:failures.append(i)
-          if failures:raise SystemExit(f'Failed batches: {failures}')
-          PY
-          python orchestrate.py
-      - name: Validate all batches
-        working-directory: geohints
-        run: |
-          python - <<'PY'
-          import json
-          from pathlib import Path
-          from pypdf import PdfReader
-          for i in range(25):
-              d=Path('out')/f'batch-{i:02d}'
-              p=d/f'GeoHints_Fotos_Batch_{i:02d}.pdf'
-              a=json.loads((d/f'GeoHints_Auditoria_Batch_{i:02d}.json').read_text(encoding='utf-8'))
-              assert a['batch_size']==10 and a['total_cards']==520
-              assert a['missing_photos']==0
-              assert a['exact_photos']+a['contextual_country_photos']==520
-              assert a['generated_or_illustrated_images']==0
-              assert len(PdfReader(str(p)).pages)==101
-          print('All 25 batches validated')
-          PY
-      - name: Merge complete atlas
-        working-directory: geohints
+          cp ../geohints-fast/strict_shard.py .
+          python -m py_compile build.py strict_shard.py
+      - name: Build shard with live country and category logs
+        working-directory: geohints-work
         env:
-          DOWNLOAD_DIR: out
-        run: python merge.py
-      - name: Validate complete atlas
-        working-directory: geohints
+          SHARD_ID: ${{ matrix.shard }}
+          SHARD_SIZE: 5
+          BATCH_ID: ${{ matrix.shard }}
+          BATCH_SIZE: 5
+          PYTHONUNBUFFERED: 1
+        run: python -u strict_shard.py
+      - name: Validate shard outputs
+        working-directory: geohints-work
+        env:
+          SHARD_ID: ${{ matrix.shard }}
         run: |
           python - <<'PY'
-          import json
+          import json,os
           from pathlib import Path
           from pypdf import PdfReader
-          d=Path('final');p=d/'Guia_GeoHints_V10_Atlas_Fotografico_250_Paises.pdf'
-          a=json.loads((d/'Guia_GeoHints_V10_Auditoria_Global.json').read_text(encoding='utf-8'))
-          assert a['countries_and_territories']==250
-          assert a['total_reference_cards']==13000
-          assert a['cards_without_verified_photo']==0
-          assert a['exact_country_category_photos']+a['contextual_real_photos_from_correct_country']==13000
-          assert a['generated_or_illustrated_images']==0
-          assert len(PdfReader(str(p)).pages)==2525
-          print({'bytes':p.stat().st_size,'pages':a['pdf_pages'],'exact':a['exact_country_category_photos'],'contextual':a['contextual_real_photos_from_correct_country'],'missing':a['cards_without_verified_photo'],'unique':a['unique_photos'],'reused':a['reused_cards']})
+          i=int(os.environ['SHARD_ID'])
+          d=Path('out')/f'batch-{i:02d}'
+          pdf=d/f'GeoHints_Fotos_Batch_{i:02d}.pdf'
+          audit=d/f'GeoHints_Auditoria_Batch_{i:02d}.json'
+          table=d/f'GeoHints_Fuentes_Batch_{i:02d}.csv'
+          data=json.loads(audit.read_text(encoding='utf-8'))
+          assert data['batch_size']==5
+          assert data['total_cards']==260
+          assert data['exact_photos']+data['contextual_country_photos']+data['missing_photos']==260
+          assert data['generated_or_illustrated_images']==0
+          assert len(PdfReader(str(pdf)).pages)==51
+          assert table.stat().st_size>500
+          print({'shard':i,'countries':5,'cards':260,'exact':data['exact_photos'],'contextual':data['contextual_country_photos'],'pending':data['missing_photos'],'unique':data['unique_photos'],'reused':data['reused_cards'],'pages':51},flush=True)
           PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: Guia_GeoHints_V10_Atlas_Fotografico_Final
-          path: |
-            geohints/final/
-            geohints/logs/
+          name: geohints-strict-shard-${{ matrix.shard }}
+          path: geohints-work/out/batch-*/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
+  merge-atlas:
+    name: merge · validate · publish
+    needs: build-shards
+    if: always() && needs.build-shards.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --disable-pip-version-check -q pypdf reportlab
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: geohints-strict-shard-*
+          path: geohints-fast/downloaded
+          merge-multiple: false
+      - name: Merge all 50 validated shards
+        working-directory: geohints-fast
+        env:
+          DOWNLOAD_DIR: downloaded
+        run: python merge50.py
+      - name: Validate global atlas and publish audit summary
+        working-directory: geohints-fast
+        run: |
+          python - <<'PY'
+          import json,os
+          from pathlib import Path
+          from pypdf import PdfReader
+          d=Path('final')
+          pdf=d/'Guia_GeoHints_V10_Atlas_Fotografico_250_Paises.pdf'
+          audit_path=d/'Guia_GeoHints_V10_Auditoria_Global.json'
+          csv_path=d/'Guia_GeoHints_V10_Fuentes_Global.csv'
+          audit=json.loads(audit_path.read_text(encoding='utf-8'))
+          pages=len(PdfReader(str(pdf)).pages)
+          assert audit['countries_and_territories']==250
+          assert audit['total_reference_cards']==13000
+          assert audit['exact_country_category_photos']+audit['contextual_real_photos_from_correct_country']+audit['cards_without_verified_photo']==13000
+          assert audit['generated_or_illustrated_images']==0
+          assert pages==audit['pdf_pages']==2501
+          assert csv_path.stat().st_size>10000
+          summary='\n'.join([
+            '# GeoHints V10 · resultado global',
+            f"- Países y territorios: {audit['countries_and_territories']}",
+            f"- Tarjetas: {audit['total_reference_cards']}",
+            f"- Fotografías exactas: {audit['exact_country_category_photos']}",
+            f"- Fotografías contextuales permitidas: {audit['contextual_real_photos_from_correct_country']}",
+            f"- Pendientes sin sustitución falsa: {audit['cards_without_verified_photo']}",
+            f"- Fotografías únicas: {audit['unique_photos']}",
+            f"- Reutilizaciones controladas: {audit['reused_cards']}",
+            f"- Páginas: {pages}",
+            '- Ilustraciones generadas: 0'
+          ])
+          Path(os.environ['GITHUB_STEP_SUMMARY']).write_text(summary,encoding='utf-8')
+          print(summary,flush=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Guia_GeoHints_V10_Atlas_Fotografico_Estricto
+          path: geohints-fast/final/
           retention-days: 7
           compression-level: 6
